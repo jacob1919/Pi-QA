@@ -52,7 +52,17 @@
 - 滚动（逐行/翻页/顶底/滚轮）、关闭键、resize、空上下文提示
 
 ```bash
-# 依赖解析依赖仓库根的 node_modules junction（指向 pi 安装目录的 node_modules）
+# node_modules 是指向本机 pi 安装目录的 junction（见下方说明），
+# 克隆后需要先创建才能跑测试
 node tests/render-harness.mjs
 node tests/scroll-harness.mjs
+```
+
+克隆本仓库后，测试依赖 `@earendil-works/pi-coding-agent` 与 `@earendil-works/pi-tui`（运行 pi 时本机已有）。在仓库根创建指向其 node_modules 的链接即可：
+
+```bash
+# Windows（管理员 cmd）
+mklink /J node_modules "%USERPROFILE%\.pi\agent\install\releases\<版本>\node_modules"
+# Linux/macOS
+ln -s ~/.pi/agent/install/releases/<版本>/node_modules node_modules
 ```

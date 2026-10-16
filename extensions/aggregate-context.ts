@@ -165,8 +165,9 @@ class AggregateWindow implements Component {
 
 			if (turn.user) {
 				for (const paragraph of turn.user.split("\n")) {
-					const trimmed = paragraph.trim();
-					if (!trimmed) continue;
+					// 保留行首缩进（代码片段等），仅去尾空白；纯空白行跳过
+					const trimmed = paragraph.trimEnd();
+					if (!trimmed.trim()) continue;
 					for (const wrapped of wrapTextWithAnsi(trimmed, contentW)) {
 						lines.push(this.theme.fg("success", this.theme.bold(wrapped)));
 					}
@@ -236,8 +237,10 @@ class AggregateWindow implements Component {
 	}
 
 	private contentLineCount(): number {
-		const width = this.tui.terminal.columns;
-		const winW = Math.min(width, MAX_WINDOW_WIDTH);
+		// 优先复用 render 已缓存的行数（宽度一致，滚动范围与显示完全同步）
+		if (this.cachedLines) return this.cachedLines.length;
+		// 无缓存时按 overlay 实际宽度（92%）推算
+		const winW = Math.min(Math.floor(this.tui.terminal.columns * 0.92) + 1, MAX_WINDOW_WIDTH);
 		return this.renderedLines(Math.max(10, winW - BORDERS - H_PADDING)).length;
 	}
 

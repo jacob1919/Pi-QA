@@ -27,7 +27,7 @@ const branch = [
 	{ type: "message", message: { role: "assistant", content: [{ type: "text", text: "让我先看看。这是中间输出，应该被丢弃。" }] } },   // 丢弃
 	{ type: "message", message: { role: "assistant", content: [{ type: "text", text: "正在调用工具。也是中间输出。" }] } },           // 丢弃
 	{ type: "message", message: { role: "assistant", content: [{ type: "text", text: "检查完成：文件有 **3 处** 问题。" }] } },      // 保留（最后一条）
-	{ type: "message", message: { role: "user", content: "第二轮：修复它们。中文宽字符对齐测试 🎉" } },
+	{ type: "message", message: { role: "user", content: "第二轮：修复它们。中文宽字符对齐测试 🎉\n    def f():\n        return 1" } },
 	{ type: "message", message: { role: "assistant", content: [{ type: "thinking", text: "ignored" }, { type: "text", text: "已修复全部问题。" }] } },
 	{ type: "compaction", data: {} },                                                                                  // 忽略
 	{ type: "message", message: { role: "system", content: "system ignored" } },                                       // 忽略
@@ -101,6 +101,11 @@ const userLine = lines.find((l) => l.includes("第一轮：帮我检查文件"))
 console.log("user line green:", userLine.includes(GREEN), "| not purple:", !userLine.includes(ACCENT), "| bold:", userLine.includes(BOLD));
 const assistantLine = lines.find((l) => l.includes("已修复全部问题"));
 console.log("assistant line plain (no green):", !assistantLine.includes(GREEN));
+
+// 缩进保留断言：多行输入的代码缩进应保留
+const stripAnsiInline = (l) => l.replace(/\x1b\[[0-9;]*m/g, "");
+const indentLine = lines.find((l) => stripAnsiInline(l).includes("def f():"));
+console.log("indent preserved:", !!indentLine && /^\s+def f\(\):/.test(stripAnsiInline(indentLine).trim().replace(/^│\s/, "").replace(/\s│$/, "")));
 
 // ---- 窗口预览（去 ANSI 展示） ----
 console.log("--- preview ---");
