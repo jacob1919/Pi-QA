@@ -18,10 +18,15 @@
  *     各一条绿色分割线，区分轮次与输入输出
  *   - 助手输出以 Markdown 渲染（与会话内一致）
  *   - 居中 overlay 窗口，键盘与滚轮滚动，Esc/q/Enter 关闭
+ *
+ * 复制：overlay 是绘制在会话之上的浮层，终端鼠标选择是屏幕级的，跨过窗口边界
+ * 会把底下的会话文本一并选入。因此提供 y 键一键复制：完整纯文本（无 ANSI、
+ * 无边框、无窗口宽度换行）经 copyToClipboard 写入剪贴板，SSH 会话自动 OSC 52
+ * 送达本地剪贴板。
  */
 
 import type { ExtensionAPI, ExtensionCommandContext, ExtensionContext, Theme } from "@earendil-works/pi-coding-agent";
-import { getMarkdownTheme } from "@earendil-works/pi-coding-agent";
+import { copyToClipboard, getMarkdownTheme } from "@earendil-works/pi-coding-agent";
 import {
 	Key,
 	Markdown,
@@ -95,7 +100,17 @@ function buildTurns(ctx: ExtensionContext): Turn[] {
 	return turns;
 }
 
-/** 聚合窗口：紧凑行流 + 自管滚动 + 严格边框对齐。 */
+/** 构建供复制的纯文本：轮内输入/输出之间与轮次之间以空行分隔，内容为原文。 */
+function buildPlainText(turns: Turn[]): string {
+	const parts: string[] = [];
+	for (const turn of turns) {
+		if (turn.user) parts.push(turn.user);
+		if (turn.assistant) parts.push(turn.assistant);
+	}
+	return parts.join("\n\n");
+}
+
+/** 聚合窗口：紧凑行流 + 自管滚动 + 严格边框对齐 + 一键复制。 */
 class AggregateWindow implements Component {
 	private readonly tui: TUI;
 	private readonly theme: Theme;
@@ -106,14 +121,25 @@ class AggregateWindow implements Component {
 	private readonly renderers: Markdown[];
 	private scrollTop = 0;
 
+	/** 复制函数（构造时快照，测试可注入）；底部提示的复制反馈与定时恢复。 */
+	private readonly copyFn: (text: string) => Promise<void>;
+	private feedback: string | null = null;
+	private feedbackTimer: ReturnType<typeof setTimeout> | null = null;
+
 	/** 渲染缓存：按宽度缓存行数组，invalidate 时失效。 */
 	private cacheWidth = -1;
 	private cachedLines: string[] | null = null;
 
-	constructor(tui: TUI, theme: Theme, turns: Turn[], done: () => void) {
+	constructor(
+		tui: TUI,
+		theme: Theme,
+		turns: Turn[],
+		done: () => void,
+	) {
 		this.tui = tui;
 		this.theme = theme;
 		this.done = done;
+		this.copyFn = activeCopyFn;
 		this.turns = turns;
 		this.title = turns.length > 0 ? ` 上下文聚合 · ${turns.length} 轮 ` : " 上下文聚合 ";
 		const mdTheme = getMarkdownTheme();
@@ -191,9 +217,12 @@ class AggregateWindow implements Component {
 		return lines;
 	}
 
-	/** 底部提示：按键说明 + 滚动位置指示。 */
+	/** 底部提示：按键说明 + 滚动位置指示；复制后短暂显示复制结果反馈。 */
 	private hintLine(totalLines: number, viewportH: number, contentW: number): string {
-		const keys = this.theme.fg("dim", "↑↓ 滚动 · PgUp/PgDn 翻页 · g/G 顶/底 · q/Esc 关闭");
+		if (this.feedback) {
+			return this.theme.fg("accent", this.feedback);
+		}
+		const keys = this.theme.fg("dim", "↑↓ 滚动 · PgUp/PgDn 翻页 · g/G 顶/底 · y 复制 · q/Esc 关闭");
 		if (totalLines <= viewportH) return keys;
 
 		const first = this.scrollTop + 1;
@@ -216,6 +245,11 @@ class AggregateWindow implements Component {
 			return;
 		}
 
+		if (data === "y") {
+			this.copyAll();
+			return;
+		}
+
 		const viewportH = this.currentViewportHeight();
 		if (matchesKey(data, "up") || data === "k") this.scrollBy(-1);
 		else if (matchesKey(data, "down") || data === "j") this.scrollBy(1);
@@ -229,6 +263,28 @@ class AggregateWindow implements Component {
 		if (event.wheelDelta === undefined) return undefined;
 		this.scrollBy(event.wheelDelta * 3);
 		return { handled: true };
+	}
+
+	/** 一键复制全部聚合内容为纯文本。 */
+	private copyAll(): void {
+		if (this.feedbackTimer) return; // 上一次复制还在反馈中，忽略连按
+		const text = buildPlainText(this.turns);
+		this.copyFn(text)
+			.then(() => this.showFeedback(`已复制 ${text.length} 字符到剪贴板`))
+			.catch((err: unknown) =>
+				this.showFeedback(
+					`复制失败：${err instanceof Error ? err.message : String(err)}`.slice(0, 80),
+				));
+	}
+
+	private showFeedback(message: string): void {
+		this.feedback = message;
+		this.tui.requestRender();
+		this.feedbackTimer = setTimeout(() => {
+			this.feedbackTimer = null;
+			this.feedback = null;
+			this.tui.requestRender();
+		}, 2000);
 	}
 
 	private currentViewportHeight(): number {
@@ -263,7 +319,20 @@ class AggregateWindow implements Component {
 		for (const renderer of this.renderers) renderer.invalidate();
 	}
 
-	dispose(): void {}
+	dispose(): void {
+		if (this.feedbackTimer) {
+			clearTimeout(this.feedbackTimer);
+			this.feedbackTimer = null;
+		}
+	}
+}
+
+/** 当前复制实现（默认系统剪贴板；测试可注入替换）。 */
+let activeCopyFn: (text: string) => Promise<void> = copyToClipboard;
+
+/** 测试注入点：替换复制实现，避免测试写入真实剪贴板。 */
+export function __injectCopyFnForTest(fn: (text: string) => Promise<void>): void {
+	activeCopyFn = fn;
 }
 
 /** 共用入口：构建轮次并弹出窗口。 */

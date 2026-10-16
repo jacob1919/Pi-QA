@@ -119,6 +119,9 @@ for (let i = 1; i <= 60; i++) {
 	longBranch.push({ type: "message", message: { role: "assistant", content: [{ type: "text", text: `第 ${i} 轮最终回复。` }] } });
 }
 let cap2 = null;
+let copiedArg = null;
+// 注入复制 spy 必须在组件构造之前（copyFn 在构造时快照）
+mod.__injectCopyFnForTest(async (text) => { copiedArg = text; });
 const ctx2 = { ...ctx, sessionManager: { getBranch: () => longBranch }, ui: { notify: () => {}, custom: async (f, o) => { cap2 = { factory: f }; } } };
 await agg.opts.handler("", ctx2);
 const comp2 = cap2.factory(fakeTui, fakeTheme, null, () => closed++);
@@ -143,5 +146,22 @@ console.log("q closes:", closed === 2);
 let notified = null;
 await agg.opts.handler("", { ...ctx, sessionManager: { getBranch: () => [] }, ui: { notify: (m, t) => { notified = { m, t }; }, custom: async () => { throw new Error("no window"); } } });
 console.log("empty branch notified:", JSON.stringify(notified));
+
+// ---- 复制功能：y 键一键复制纯文本（注入 spy，不写真实剪贴板） ----
+comp2.handleInput("y");
+await new Promise((r) => setTimeout(r, 20));
+console.log("copy triggered:", copiedArg !== null);
+if (copiedArg === null) process.exit(1);
+console.log("copy content has user text:", copiedArg.includes("第 1 轮输入"));
+console.log("copy content has finals:", copiedArg.includes("第 60 轮最终回复"));
+console.log("copy excludes intermediates:", !copiedArg.includes("中间说明"));
+console.log("copy has no ANSI/border:", !/\x1b\[|^[│╭╰├]/m.test(copiedArg));
+console.log("turns separated by blank line:", /\n\n/.test(copiedArg));
+// 复制反馈显示在提示行
+const lFeedback = comp2.render(100);
+console.log("feedback shown:", lFeedback.some((l) => stripAnsi(l).includes("已复制")));
+// esc 仍可关闭（y 不冲突；此前 esc/q 已各关闭一次，这次应为第 3 次）
+comp2.handleInput("\x1b");
+console.log("esc still closes after copy:", closed === 3);
 
 console.log("\nALL RENDER TESTS DONE");
