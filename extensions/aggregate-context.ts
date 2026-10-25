@@ -1,28 +1,33 @@
 /**
- * Context Aggregator — 聚合当前会话分支中每轮交互的用户输入与最终回复。
+ * Context Aggregator — collapses every turn of the current session branch into
+ * one overlay window: your input plus the final assistant reply of each turn.
  *
- * 触发方式：
- *   - 快捷键 Alt+A
- *   - 命令 /aggregate
+ * Trigger:
+ *   - Shortcut: Alt+A
+ *   - Command:  /aggregate
  *
- * 聚合规则：
- *   - 从 ctx.sessionManager.getBranch() 提取当前活跃分支（排除废弃分支）
- *   - 一轮交互 = 一条用户输入到下一条用户输入之间的全部消息
- *   - 每轮只保留：开头的用户输入 + 结尾（最后一条）的助手文本
- *   - 中间的助手输出（工具调用前的简短说明等）全部忽略
- *   - 工具调用、思考内容、系统消息、工具结果、分支/压缩摘要不参与
+ * Aggregation rules:
+ *   - Source is ctx.sessionManager.getBranch() — the active branch, without
+ *     abandoned branches.
+ *   - One turn = everything between two consecutive user messages.
+ *   - Only the leading user input and the last assistant text of a turn are
+ *     kept; intermediate assistant messages (e.g. short notes before tool
+ *     calls) are dropped.
+ *   - Tool calls, thinking blocks, system messages, tool results, branch
+ *     summaries and compaction summaries do not participate.
  *
- * 展示规则：
- *   - 紧凑排版：无角色标签、块间无空行
- *   - 用户输入整行绿色加粗；输入与输出之间、上一轮输出结尾与下一轮输入之间
- *     各一条绿色分割线，区分轮次与输入输出
- *   - 助手输出以 Markdown 渲染（与会话内一致）
- *   - 居中 overlay 窗口，键盘与滚轮滚动，Esc/q/Enter 关闭
+ * Display rules:
+ *   - Compact layout: no role labels, no blank lines between blocks.
+ *   - User input in bold green; green separator lines between turns and
+ *     between a turn's input and its output.
+ *   - Assistant output rendered as Markdown (same as in the session view).
+ *   - Centered overlay window, keyboard + mouse-wheel scrolling, q/Esc closes.
  *
- * 复制：overlay 是绘制在会话之上的浮层，终端鼠标选择是屏幕级的，跨过窗口边界
- * 会把底下的会话文本一并选入。因此提供 y 键一键复制：完整纯文本（无 ANSI、
- * 无边框、无窗口宽度换行）经 copyToClipboard 写入剪贴板，SSH 会话自动 OSC 52
- * 送达本地剪贴板。
+ * Copy: the overlay floats above the session, while terminal mouse selection
+ * is screen-level — dragging across the window border also selects the session
+ * text underneath. So `y` copies the full plain text (no ANSI, no borders, no
+ * window-width wrapping) through copyToClipboard; SSH sessions automatically
+ * fall back to OSC 52 so the text lands on the local clipboard.
  */
 
 import type { ExtensionAPI, ExtensionCommandContext, ExtensionContext, Theme } from "@earendil-works/pi-coding-agent";
@@ -39,19 +44,25 @@ import {
 	type TuiMouseEvent,
 } from "@earendil-works/pi-tui";
 
-/** 窗口占终端高度的比例（与 overlayOptions.maxHeight 保持一致）。 */
-const HEIGHT_RATIO = 0.85;
-/** 窗口最大宽度（列）。 */
+/**
+ * Window sizing. WIDTH_PCT/HEIGHT_PCT must stay in sync with the overlay
+ * options in showAggregateWindow(); the same integer math pi-tui applies to
+ * percentage sizes (floor(n * pct / 100)) is used for every derived size so
+ * the component can never disagree with the overlay.
+ */
+const WIDTH_PCT = 92;
+const HEIGHT_PCT = 85;
+/** Maximum window width in columns. */
 const MAX_WINDOW_WIDTH = 120;
-/** 窗口内容区左右各留 1 列内边距，外加左右边框各 1 列。 */
+/** One column of inner padding on each side, plus the left/right borders. */
 const H_PADDING = 2;
 const BORDERS = 2;
-/** 顶部边框 + 标题栏 + 分隔线 + 分隔线 + 提示栏 + 底部边框。 */
+/** Top border + title bar + rule + [content] + rule + hint bar + bottom border. */
 const CHROME_LINES = 6;
 
 type SessionMessage = { role?: string; content?: unknown };
 
-/** 提取一条消息 content 里的纯文本（字符串或 text 块数组）。 */
+/** Extract the plain text of a message content (string or text-block array). */
 function extractText(content: unknown): string {
 	if (typeof content === "string") return content;
 	if (!Array.isArray(content)) return "";
@@ -67,13 +78,13 @@ function extractText(content: unknown): string {
 }
 
 interface Turn {
-	/** 本轮用户输入（null = 会话开头没有用户输入就出现助手消息）。 */
+	/** The user input of this turn (null = assistant output before any input). */
 	user: string | null;
-	/** 本轮最后一条助手文本（中间的助手输出被覆盖丢弃）。 */
+	/** The last assistant text of this turn (intermediate messages overwrite it). */
 	assistant: string | null;
 }
 
-/** 把分支消息折叠为轮次：每轮只留开头输入与结尾回复。 */
+/** Collapse the branch into turns: leading input + final reply per turn. */
 function buildTurns(ctx: ExtensionContext): Turn[] {
 	const entries = ctx.sessionManager.getBranch();
 	const turns: Turn[] = [];
@@ -92,7 +103,7 @@ function buildTurns(ctx: ExtensionContext): Turn[] {
 			current = { user: text, assistant: null };
 		} else if (message.role === "assistant") {
 			if (!current) current = { user: null, assistant: null };
-			current.assistant = text; // 不断覆盖，只留最后一条
+			current.assistant = text; // keep overwriting, only the last one survives
 		}
 	}
 	if (current) turns.push(current);
@@ -100,33 +111,37 @@ function buildTurns(ctx: ExtensionContext): Turn[] {
 	return turns;
 }
 
-/** 构建供复制的纯文本：轮内输入/输出之间与轮次之间以空行分隔，内容为原文。 */
+/**
+ * Build the plain-text payload for copying: input and final reply separated by
+ * a blank line, turns separated by `---` so turn boundaries stay visible once
+ * colors and separator lines are stripped.
+ */
 function buildPlainText(turns: Turn[]): string {
-	const parts: string[] = [];
-	for (const turn of turns) {
-		if (turn.user) parts.push(turn.user);
-		if (turn.assistant) parts.push(turn.assistant);
-	}
-	return parts.join("\n\n");
+	const blocks = turns.map((turn) =>
+		[turn.user, turn.assistant].filter((part) => part !== null && part.length > 0).join("\n\n"),
+	);
+	return blocks.join("\n\n---\n\n");
 }
 
-/** 聚合窗口：紧凑行流 + 自管滚动 + 严格边框对齐 + 一键复制。 */
+/** The aggregate window: compact line stream + self-managed scrolling + strict
+ * border alignment + one-key copy. */
 class AggregateWindow implements Component {
 	private readonly tui: TUI;
 	private readonly theme: Theme;
 	private readonly done: () => void;
 	private readonly title: string;
 	private readonly turns: Turn[];
-	/** 每轮的助手 Markdown 渲染器（构造时创建一次）。 */
+	/** One Markdown renderer per turn (created once, cached internally). */
 	private readonly renderers: Markdown[];
 	private scrollTop = 0;
 
-	/** 复制函数（构造时快照，测试可注入）；底部提示的复制反馈与定时恢复。 */
+	/** Copy function (snapshotted at construction, injectable for tests). */
 	private readonly copyFn: (text: string) => Promise<void>;
 	private feedback: string | null = null;
 	private feedbackTimer: ReturnType<typeof setTimeout> | null = null;
+	private disposed = false;
 
-	/** 渲染缓存：按宽度缓存行数组，invalidate 时失效。 */
+	/** Render cache keyed by content width; invalidated by invalidate(). */
 	private cacheWidth = -1;
 	private cachedLines: string[] | null = null;
 
@@ -141,7 +156,7 @@ class AggregateWindow implements Component {
 		this.done = done;
 		this.copyFn = activeCopyFn;
 		this.turns = turns;
-		this.title = turns.length > 0 ? ` 上下文聚合 · ${turns.length} 轮 ` : " 上下文聚合 ";
+		this.title = turns.length > 0 ? ` Context · ${turns.length} turns ` : " Context ";
 		const mdTheme = getMarkdownTheme();
 		this.renderers = turns.map((turn) => new Markdown(turn.assistant ?? "", 0, 0, mdTheme));
 	}
@@ -152,9 +167,7 @@ class AggregateWindow implements Component {
 
 		const lines = this.renderedLines(contentW);
 
-		// 视口高度：按终端高度的比例，扣除窗口装饰行。
-		const totalH = Math.max(8, Math.floor(this.tui.terminal.rows * HEIGHT_RATIO));
-		const viewportH = Math.max(2, totalH - CHROME_LINES);
+		const viewportH = this.viewportHeight();
 		const maxScroll = Math.max(0, lines.length - viewportH);
 		this.scrollTop = Math.min(Math.max(0, this.scrollTop), maxScroll);
 
@@ -164,19 +177,30 @@ class AggregateWindow implements Component {
 		const row = (content: string) =>
 			border("│") + " " + this.padToWidth(truncateToWidth(content, contentW, ""), contentW) + " " + border("│");
 
-		const out: string[] = [border(`╭${"─".repeat(winW - BORDERS)}╮`)];
-		out.push(row(this.theme.fg("accent", this.theme.bold(this.title))));
-		out.push(border(`├${"─".repeat(winW - BORDERS)}┤`));
+		const box: string[] = [border(`╭${"─".repeat(winW - BORDERS)}╮`)];
+		box.push(row(this.theme.fg("accent", this.theme.bold(this.title))));
+		box.push(border(`├${"─".repeat(winW - BORDERS)}┤`));
 
-		for (const line of visible) out.push(row(line));
+		for (const line of visible) box.push(row(line));
 
-		out.push(border(`├${"─".repeat(winW - BORDERS)}┤`));
-		out.push(row(this.hintLine(lines.length, viewportH, contentW)));
-		out.push(border(`╰${"─".repeat(winW - BORDERS)}╯`));
-		return out;
+		box.push(border(`├${"─".repeat(winW - BORDERS)}┤`));
+		box.push(row(this.hintLine(lines.length, viewportH, contentW)));
+		box.push(border(`╰${"─".repeat(winW - BORDERS)}╯`));
+
+		// The overlay declares width = WIDTH_PCT% of the terminal while this
+		// window caps at MAX_WINDOW_WIDTH. pi-tui positions overlay lines by
+		// the declared width and never pads on the left, so a narrower box
+		// would sit left of center on wide terminals. Center the box within
+		// the declared width so the overlay's own centering math holds.
+		const leftPad = Math.floor((width - winW) / 2);
+		if (leftPad <= 0) return box;
+		const start = " ".repeat(leftPad);
+		const end = " ".repeat(width - winW - leftPad);
+		return box.map((line) => start + line + end);
 	}
 
-	/** 构建紧凑行流：用户行（强调色）在前，最终回复 Markdown 行紧随，无任何空行。 */
+	/** Build the compact line stream: user line (highlighted) first, final
+	 * reply Markdown lines right after, no blank lines anywhere. */
 	private renderedLines(contentW: number): string[] {
 		if (this.cachedLines && this.cacheWidth === contentW) return this.cachedLines;
 
@@ -184,14 +208,17 @@ class AggregateWindow implements Component {
 		for (let i = 0; i < this.turns.length; i++) {
 			const turn = this.turns[i]!;
 
-			// 轮次之间的绿色分割线：上一轮有输出时，在其结尾与本轮输入之间加线
-			if (i > 0 && this.turns[i - 1]!.assistant) {
+			// Green separator between turns — unconditional, so two inputs of
+			// consecutive output-less turns (e.g. interrupted twice) cannot
+			// visually merge into one.
+			if (i > 0) {
 				lines.push(this.theme.fg("success", "─".repeat(contentW)));
 			}
 
 			if (turn.user) {
 				for (const paragraph of turn.user.split("\n")) {
-					// 保留行首缩进（代码片段等），仅去尾空白；纯空白行跳过
+					// Keep leading indentation (code snippets etc.), trim only
+					// the end; skip lines that are entirely whitespace.
 					const trimmed = paragraph.trimEnd();
 					if (!trimmed.trim()) continue;
 					for (const wrapped of wrapTextWithAnsi(trimmed, contentW)) {
@@ -201,7 +228,8 @@ class AggregateWindow implements Component {
 			}
 
 			if (turn.assistant) {
-				// 输入与输出之间的绿色分割线（仅当本轮同时有输入和输出）
+				// Green separator between a turn's input and its output (only
+				// when the turn actually has both).
 				if (turn.user) {
 					lines.push(this.theme.fg("success", "─".repeat(contentW)));
 				}
@@ -217,12 +245,13 @@ class AggregateWindow implements Component {
 		return lines;
 	}
 
-	/** 底部提示：按键说明 + 滚动位置指示；复制后短暂显示复制结果反馈。 */
+	/** Bottom hint: key legend + scroll position; briefly replaced by copy
+	 * feedback after `y`. */
 	private hintLine(totalLines: number, viewportH: number, contentW: number): string {
 		if (this.feedback) {
 			return this.theme.fg("accent", this.feedback);
 		}
-		const keys = this.theme.fg("dim", "↑↓ 滚动 · PgUp/PgDn 翻页 · g/G 顶/底 · y 复制 · q/Esc 关闭");
+		const keys = this.theme.fg("dim", "↑↓ scroll · PgUp/PgDn page · g/G top/bottom · y copy · q/Esc close");
 		if (totalLines <= viewportH) return keys;
 
 		const first = this.scrollTop + 1;
@@ -233,10 +262,21 @@ class AggregateWindow implements Component {
 		return keys + " ".repeat(gap) + indicator;
 	}
 
-	/** 用可见宽度右补空格（截断由 truncateToWidth 负责）。 */
+	/** Right-pad to a visible width (truncation is truncateToWidth's job). */
 	private padToWidth(text: string, width: number): string {
 		const pad = width - visibleWidth(text);
 		return pad > 0 ? text + " ".repeat(pad) : text;
+	}
+
+	/**
+	 * Viewport height in content lines. Derived with the same integer math the
+	 * overlay applies to its maxHeight percentage, so the rendered window can
+	 * never exceed the overlay cap — otherwise the bottom border and hint bar
+	 * get clipped on short terminals.
+	 */
+	private viewportHeight(): number {
+		const overlayMax = Math.floor((this.tui.terminal.rows * HEIGHT_PCT) / 100);
+		return Math.max(1, overlayMax - CHROME_LINES);
 	}
 
 	handleInput(data: string): void {
@@ -245,12 +285,12 @@ class AggregateWindow implements Component {
 			return;
 		}
 
-		if (data === "y") {
+		if (data === "y" || data === "Y") {
 			this.copyAll();
 			return;
 		}
 
-		const viewportH = this.currentViewportHeight();
+		const viewportH = this.viewportHeight();
 		if (matchesKey(data, "up") || data === "k") this.scrollBy(-1);
 		else if (matchesKey(data, "down") || data === "j") this.scrollBy(1);
 		else if (matchesKey(data, "pageUp")) this.scrollBy(-viewportH);
@@ -265,19 +305,20 @@ class AggregateWindow implements Component {
 		return { handled: true };
 	}
 
-	/** 一键复制全部聚合内容为纯文本。 */
+	/** Copy the full aggregated plain text. */
 	private copyAll(): void {
-		if (this.feedbackTimer) return; // 上一次复制还在反馈中，忽略连按
+		if (this.feedbackTimer) return; // previous copy feedback still active, ignore repeats
 		const text = buildPlainText(this.turns);
 		this.copyFn(text)
-			.then(() => this.showFeedback(`已复制 ${text.length} 字符到剪贴板`))
+			.then(() => this.showFeedback(`Copied ${text.length} characters to clipboard`))
 			.catch((err: unknown) =>
 				this.showFeedback(
-					`复制失败：${err instanceof Error ? err.message : String(err)}`.slice(0, 80),
+					`Copy failed: ${err instanceof Error ? err.message : String(err)}`.slice(0, 80),
 				));
 	}
 
 	private showFeedback(message: string): void {
+		if (this.disposed) return; // window closed while the copy promise was in flight
 		this.feedback = message;
 		this.tui.requestRender();
 		this.feedbackTimer = setTimeout(() => {
@@ -287,16 +328,14 @@ class AggregateWindow implements Component {
 		}, 2000);
 	}
 
-	private currentViewportHeight(): number {
-		const totalH = Math.max(8, Math.floor(this.tui.terminal.rows * HEIGHT_RATIO));
-		return Math.max(2, totalH - CHROME_LINES);
-	}
-
 	private contentLineCount(): number {
-		// 优先复用 render 已缓存的行数（宽度一致，滚动范围与显示完全同步）
+		// Prefer the cache from the last render: same width, so scroll bounds
+		// match what is on screen exactly.
 		if (this.cachedLines) return this.cachedLines.length;
-		// 无缓存时按 overlay 实际宽度（92%）推算
-		const winW = Math.min(Math.floor(this.tui.terminal.columns * 0.92) + 1, MAX_WINDOW_WIDTH);
+		// No cache yet (scrolled before the first render): estimate at the
+		// overlay's actual width, using the same math pi-tui applies to
+		// percentage sizes.
+		const winW = Math.min(Math.floor((this.tui.terminal.columns * WIDTH_PCT) / 100), MAX_WINDOW_WIDTH);
 		return this.renderedLines(Math.max(10, winW - BORDERS - H_PADDING)).length;
 	}
 
@@ -305,7 +344,7 @@ class AggregateWindow implements Component {
 	}
 
 	private scrollTo(position: number): void {
-		const maxScroll = Math.max(0, this.contentLineCount() - this.currentViewportHeight());
+		const maxScroll = Math.max(0, this.contentLineCount() - this.viewportHeight());
 		const next = Math.min(Math.max(0, position), maxScroll);
 		if (next !== this.scrollTop) {
 			this.scrollTop = next;
@@ -320,6 +359,7 @@ class AggregateWindow implements Component {
 	}
 
 	dispose(): void {
+		this.disposed = true;
 		if (this.feedbackTimer) {
 			clearTimeout(this.feedbackTimer);
 			this.feedbackTimer = null;
@@ -327,21 +367,22 @@ class AggregateWindow implements Component {
 	}
 }
 
-/** 当前复制实现（默认系统剪贴板；测试可注入替换）。 */
+/** Current copy implementation (system clipboard by default; tests can swap it). */
 let activeCopyFn: (text: string) => Promise<void> = copyToClipboard;
 
-/** 测试注入点：替换复制实现，避免测试写入真实剪贴板。 */
+/** Test injection point: replace the copy implementation so tests do not
+ * touch the real clipboard. */
 export function __injectCopyFnForTest(fn: (text: string) => Promise<void>): void {
 	activeCopyFn = fn;
 }
 
-/** 共用入口：构建轮次并弹出窗口。 */
+/** Shared entry point: build turns and pop up the window. */
 async function showAggregateWindow(ctx: ExtensionContext): Promise<void> {
 	const turns = buildTurns(ctx);
 
 	if (turns.length === 0) {
 		if (ctx.hasUI) {
-			ctx.ui.notify("当前上下文中没有可聚合的用户输入或助手输出", "warning");
+			ctx.ui.notify("Nothing to aggregate: no user input or assistant output in this branch", "warning");
 		}
 		return;
 	}
@@ -352,26 +393,27 @@ async function showAggregateWindow(ctx: ExtensionContext): Promise<void> {
 			overlay: true,
 			overlayOptions: {
 				anchor: "center",
-				width: "92%",
-				maxHeight: `${Math.round(HEIGHT_RATIO * 100)}%`,
+				width: `${WIDTH_PCT}%`,
+				maxHeight: `${HEIGHT_PCT}%`,
 			},
 		},
 	);
 }
 
 export default function (pi: ExtensionAPI): void {
-	// Alt+A：所有主流终端都能可靠发送 ESC a（Ctrl+Shift+A 在传统终端编码下
-	// 与 Ctrl+A 不可区分，无法触发），且不与 pi 内置键绑定冲突。
+	// Alt+A: every mainstream terminal sends a distinct ESC a for it (older
+	// terminals encode Ctrl+Shift+A identically to Ctrl+A, making it unusable)
+	// and it does not collide with pi's built-in bindings.
 	pi.registerShortcut(Key.alt("a"), {
-		description: "聚合当前上下文每轮交互的输入与最终回复",
+		description: "Aggregate the input and final reply of every turn in this session",
 		handler: (ctx) => showAggregateWindow(ctx),
 	});
 
 	pi.registerCommand("aggregate", {
-		description: "聚合当前上下文每轮交互的输入与最终回复（快捷键 Alt+A）",
+		description: "Aggregate the input and final reply of every turn in this session (shortcut: Alt+A)",
 		handler: async (_args: string | undefined, ctx: ExtensionCommandContext) => {
 			if (ctx.mode !== "tui") {
-				if (ctx.hasUI) ctx.ui.notify("聚合窗口需要交互式终端模式（TUI）", "warning");
+				if (ctx.hasUI) ctx.ui.notify("The aggregate window requires interactive TUI mode", "warning");
 				return;
 			}
 			await showAggregateWindow(ctx);
