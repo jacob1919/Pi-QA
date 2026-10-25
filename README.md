@@ -5,7 +5,7 @@
 ## Install
 
 ```bash
-pi install npm:pi-qa
+pi install npm:@jacob1919/pi-qa
 ```
 
 Or load it straight from a checkout while developing:
@@ -80,11 +80,13 @@ This is a standard npm package following the [pi package conventions](https://gi
 - `"keywords": ["pi-package"]` makes it show up in the [pi.dev package gallery](https://pi.dev/packages).
 - Host-provided packages (`@earendil-works/pi-coding-agent`, `@earendil-works/pi-tui`) are `peerDependencies: "*"` — pi supplies them at runtime; they are never bundled.
 
+The package is scoped (`@jacob1919/pi-qa`) because npm rejected the unscoped `pi-qa` as too similar to the popular `pinia` package (typosquatting protection). `--access public` is required: scoped packages default to private on npm.
+
 Release flow:
 
 ```bash
 npm test
-npm publish --access public
+npm publish --registry https://registry.npmjs.org --access public
 ```
 
 ## License

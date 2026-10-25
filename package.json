@@ -1,5 +1,5 @@
 {
-	"name": "pi-qa",
+	"name": "@jacob1919/pi-qa",
 	"version": "1.0.0",
 	"description": "Pi extension: a centered overlay window that aggregates every turn of the current session (user input + final assistant reply), with scrolling and one-key plain-text copy.",
 	"keywords": [
